@@ -70,8 +70,52 @@
   
   // ===== CORE FUNCTIONALITY =====
   
-  var processed = new Map(); // Track processed elements by selector
+  // ES5-compatible Map replacement
+  var processed = {};
+  
+  // ES5-compatible Set replacement
+  function createSet() {
+    var items = [];
+    return {
+      has: function(item) {
+        for (var i = 0; i < items.length; i++) {
+          if (items[i] === item) return true;
+        }
+        return false;
+      },
+      add: function(item) {
+        if (!this.has(item)) {
+          items.push(item);
+        }
+      }
+    };
+  }
+  
   var debounceTimer = null;
+  
+  // Safe localStorage operations
+  function safeLocalStorageGet(key) {
+    try {
+      return localStorage.getItem(key);
+    } catch (e) {
+      if (config.debugMode) {
+        console.warn('Phone Swapper: localStorage access denied:', e);
+      }
+      return null;
+    }
+  }
+  
+  function safeLocalStorageSet(key, value) {
+    try {
+      localStorage.setItem(key, value);
+      return true;
+    } catch (e) {
+      if (config.debugMode) {
+        console.warn('Phone Swapper: localStorage write failed:', e);
+      }
+      return false;
+    }
+  }
   
   // Get UTM value based on configured parameter
   function getUtmValue() {
@@ -80,8 +124,8 @@
     
     if (utmValue) {
       // Store new UTM with timestamp
-      localStorage.setItem('phoneSwapper_utm_' + config.utmParameter, utmValue);
-      localStorage.setItem('phoneSwapper_time', Date.now().toString());
+      safeLocalStorageSet('phoneSwapper_utm_' + config.utmParameter, utmValue);
+      safeLocalStorageSet('phoneSwapper_time', Date.now().toString());
       return utmValue;
     } else if (stored.utm && !stored.expired) {
       // Use stored UTM if not expired
@@ -94,8 +138,8 @@
   // Get stored UTM with expiration check
   function getStoredUtm() {
     try {
-      var utm = localStorage.getItem('phoneSwapper_utm_' + config.utmParameter);
-      var time = localStorage.getItem('phoneSwapper_time');
+      var utm = safeLocalStorageGet('phoneSwapper_utm_' + config.utmParameter);
+      var time = safeLocalStorageGet('phoneSwapper_time');
       
       if (!utm || !time) return { utm: null, expired: true };
       
@@ -108,14 +152,21 @@
     }
   }
   
-  // Get query parameter
+  // Get query parameter - ES5 compatible
   function getQueryParam(param) {
-    var urlParams = new URLSearchParams(window.location.search);
-    return urlParams.get(param);
+    try {
+      // Use regex fallback for older browsers
+      var regex = new RegExp('[?&]' + param + '=([^&#]*)');
+      var results = regex.exec(window.location.search);
+      return results ? decodeURIComponent(results[1].replace(/\+/g, ' ')) : null;
+    } catch (e) {
+      return null;
+    }
   }
   
   // Clean phone number for tel: links
   function cleanPhone(phone) {
+    if (!phone || typeof phone !== 'string') return '';
     return phone.replace(/\D/g, '');
   }
   
@@ -157,16 +208,18 @@
       var utmValue = getUtmValue();
       
       // Process each selector mapping
-      Object.keys(config.selectorMappings).forEach(function(selector) {
+      var selectorKeys = Object.keys(config.selectorMappings);
+      for (var s = 0; s < selectorKeys.length; s++) {
+        var selector = selectorKeys[s];
         var elements = document.querySelectorAll(selector);
         var phoneData = getPhoneForSelector(selector);
         var selectorUpdated = 0;
         
         // Get or create processed set for this selector
-        if (!processed.has(selector)) {
-          processed.set(selector, new Set());
+        if (!processed[selector]) {
+          processed[selector] = createSet();
         }
-        var selectorProcessed = processed.get(selector);
+        var selectorProcessed = processed[selector];
         
         // Update each element with this selector
         for (var i = 0; i < elements.length; i++) {
@@ -175,7 +228,7 @@
           if (selectorProcessed.has(element)) continue;
           
           // Update text content
-          if (element.textContent.trim()) {
+          if (element.textContent && element.textContent.trim()) {
             element.textContent = phoneData.number;
           }
           
@@ -185,7 +238,7 @@
           }
           
           // Update other href attributes
-          if (config.updateLinks && element.href && element.href.startsWith('tel:')) {
+          if (config.updateLinks && element.href && element.href.indexOf('tel:') === 0) {
             element.href = 'tel:' + cleanPhone(phoneData.number);
           }
           
@@ -198,7 +251,7 @@
           console.log('Selector "' + selector + '": Updated ' + selectorUpdated + ' elements');
           console.log('  Phone: ' + phoneData.number + ' (Type: ' + phoneData.type + ')');
         }
-      });
+      }
       
       if (config.debugMode) {
         console.log('=== Phone Swapper Summary ===');
@@ -221,8 +274,20 @@
     debounceTimer = setTimeout(updatePhoneElements, 100);
   }
   
+  // Cleanup function
+  function cleanup() {
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    processed = {};
+  }
+  
   // Initialize
   function init() {
+    // Cleanup any existing instances
+    cleanup();
+    
     // Initial update
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', updatePhoneElements);
@@ -235,30 +300,53 @@
       var observer = new MutationObserver(function(mutations) {
         var shouldUpdate = false;
         
-        mutations.forEach(function(mutation) {
+        for (var i = 0; i < mutations.length; i++) {
+          var mutation = mutations[i];
           if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-            for (var i = 0; i < mutation.addedNodes.length; i++) {
-              if (mutation.addedNodes[i].nodeType === 1) { // Element node
-                shouldUpdate = true;
-                break;
+            for (var j = 0; j < mutation.addedNodes.length; j++) {
+              var node = mutation.addedNodes[j];
+              if (node && node.nodeType === 1) { // Element node
+                // Check if the added node or its children match our selectors
+                try {
+                  if (node.querySelectorAll) {
+                    var selectorKeys = Object.keys(config.selectorMappings);
+                    for (var k = 0; k < selectorKeys.length; k++) {
+                      var selector = selectorKeys[k];
+                      var matches = node.querySelectorAll(selector);
+                      if (matches.length > 0) {
+                        shouldUpdate = true;
+                        break;
+                      }
+                    }
+                  }
+                } catch (e) {
+                  // Continue if selector fails
+                }
               }
             }
           }
-        });
+        }
         
         if (shouldUpdate) {
           debounceUpdate();
         }
       });
       
-      observer.observe(document.body, {
-        childList: true,
-        subtree: true
-      });
+      try {
+        observer.observe(document.body, {
+          childList: true,
+          subtree: true
+        });
+      } catch (e) {
+        if (config.debugMode) {
+          console.warn('Phone Swapper: MutationObserver failed:', e);
+        }
+      }
     }
     
     // Expose manual update function
     window.phoneSwapperUpdate = updatePhoneElements;
+    window.phoneSwapperCleanup = cleanup;
   }
   
   // Start the phone switcher
